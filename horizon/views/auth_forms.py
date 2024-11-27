@@ -28,6 +28,7 @@ from django import shortcuts
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import REDIRECT_FIELD_NAME
+from django.utils.http import same_origin
 from django.utils.translation import ugettext as _
 from keystoneclient import exceptions as keystone_exceptions
 
@@ -77,6 +78,16 @@ class Login(forms.SelfHandlingForm):
             self.fields['region'].widget = forms.widgets.HiddenInput()
 
     def handle(self, request, data):
+        if 'user_name' in request.session:
+            if request.session['user_name'] != data['username']:
+                # To avoid reusing another user's session, create a
+                # new, empty session if the existing session
+                # corresponds to a different authenticated user.
+                request.session.flush()
+        # Always cycle the session key when viewing the login form to
+        # prevent session fixation
+        request.session.cycle_key()
+
         # For now we'll allow fallback to OPENSTACK_KEYSTONE_URL if the
         # form post doesn't include a region.
         endpoint = data.get('region', None) or settings.OPENSTACK_KEYSTONE_URL
@@ -84,7 +95,13 @@ class Login(forms.SelfHandlingForm):
         request.session['region_endpoint'] = endpoint
         request.session['region_name'] = region_name
 
-        redirect_to = request.REQUEST.get(REDIRECT_FIELD_NAME, "")
+        redirect_to = request.REQUEST.get(REDIRECT_FIELD_NAME, None)
+        # Make sure the requested redirect matches the protocol,
+        # domain, and port of this request
+        if redirect_to and not same_origin(
+                request.build_absolute_uri(redirect_to),
+                request.build_absolute_uri()):
+            redirect_to = None
 
         if data.get('tenant', None):
             try:
@@ -116,7 +133,7 @@ class Login(forms.SelfHandlingForm):
                 # If we get here we don't want to show a stack trace to the
                 # user. However, if we fail here, there may be bad session
                 # data that's been cached already.
-                request.session.clear()
+                request.user_logout()
                 exceptions.handle(request,
                                   message=_("An error occurred authenticating."
                                             " Please try again later."),
